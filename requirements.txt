@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+insightface
+onnxruntime
+numpy
+opencv-python-headless
+python-multipart
+flask
+pydantic_core
+scikit-image
