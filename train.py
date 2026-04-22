@@ -9,12 +9,16 @@ from insightface.app import FaceAnalysis
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 import uvicorn
 from pymongo import MongoClient
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 # MongoDB Setup
-MONGO_URI = "mongodb+srv://faceerp:faceerp@cluster0.kvd3q8j.mongodb.net/erp?retryWrites=true&w=majority&appName=Cluster0"
+MONGO_URI = os.getenv("MONGO_URI")
 client = MongoClient(MONGO_URI)
-db_mongo = client["pg_axis_erp"]
-collection_trained = db_mongo["resident_trained_data"]
+db_mongo = client["pg_axis"]
+collection_trained = db_mongo["face_trained_data"]
 
 TRAIN_DIR = "train_images"
 TRAINED_DIR = "Trained"

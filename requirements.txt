@@ -11,3 +11,4 @@ scikit-image
 httpx
 boto3
 python-dotenv
+pymongo
