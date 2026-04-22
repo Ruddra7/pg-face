@@ -4,3 +4,9 @@ __pycache__/
 *.pyc
 embeddings.json
 .env
+BodyCaptures/
+FullCaptures/
+old/
+recognition_results.json
+s3_test.jpg
+sk/
