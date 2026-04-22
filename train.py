@@ -3,195 +3,195 @@ import os
 import json
 import numpy as np
 import cv2
+import time
+from datetime import datetime
 from insightface.app import FaceAnalysis
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 import uvicorn
-import argparse
+from pymongo import MongoClient
 
-# Default configurations
+# MongoDB Setup
+MONGO_URI = "mongodb+srv://faceerp:faceerp@cluster0.kvd3q8j.mongodb.net/erp?retryWrites=true&w=majority&appName=Cluster0"
+client = MongoClient(MONGO_URI)
+db_mongo = client["pg_axis_erp"]
+collection_trained = db_mongo["resident_trained_data"]
+
 TRAIN_DIR = "train_images"
-OUTPUT_JSON = "embeddings.json"
 TRAINED_DIR = "Trained"
 
+# Quality thresholds
+TRAINING_QUALITY_THRESHOLD = 65.0 # Minimum unified score to allow training
 
-# FastAPI instance for the "endpoint"
+# FastAPI instance
 app = FastAPI(title="Face Trainer Service")
 
-# Initialize InsightFace (global to share across API/CLI)
+# Initialize InsightFace
 print("Loading face analysis model...")
 face_app = FaceAnalysis(name="buffalo_l", providers=['CPUExecutionProvider'])
 face_app.prepare(ctx_id=-1)
 
-def load_db():
-    if os.path.exists(OUTPUT_JSON):
-        try:
-            with open(OUTPUT_JSON, "r") as f:
-                return json.load(f)
-        except:
-            return {}
-    return {}
+def get_image_quality(img, face):
+    """Calculate detection confidence and sharpness on the face region."""
+    det_score = face.det_score
+    
+    # Crop to the face bounding box
+    bbox = face.bbox.astype(int)
+    x1, y1, x2, y2 = max(0, bbox[0]), max(0, bbox[1]), min(img.shape[1], bbox[2]), min(img.shape[0], bbox[3])
+    face_img = img[y1:y2, x1:x2]
+    
+    if face_img.size == 0:
+        return float(det_score), 0.0
 
-def save_db(face_db):
-    with open(OUTPUT_JSON, "w") as f:
-        json.dump(face_db, f, indent=4)
+    gray_face = cv2.cvtColor(face_img, cv2.COLOR_BGR2GRAY)
+    blur_score = cv2.Laplacian(gray_face, cv2.CV_64F).var()
+    brightness = np.mean(gray_face)
+    contrast = np.std(gray_face)
+    
+    # --- Unified Quality Score Calculation (0-100) ---
+    # 1. Detection (Confidence) - Weight 40%
+    n_det = det_score * 100
+    
+    # 2. Sharpness (Blur) - Weight 30% (Perfect sharpness starts at ~300)
+    n_blur = min(100, (blur_score / 300.0) * 100)
+    
+    # 3. Brightness - Weight 15% (Ideal brightness ~110)
+    n_bright = max(0, 100 - abs(brightness - 110) * 0.8)
+    
+    # 4. Contrast - Weight 15% (Ideal contrast > 60)
+    n_contrast = min(100, (contrast / 60.0) * 100)
+    
+    unified_score = (n_det * 0.40) + (n_blur * 0.30) + (n_bright * 0.15) + (n_contrast * 0.15)
+    
+    return float(round(unified_score, 2)), {
+        "det": float(round(det_score, 3)),
+        "blur": float(round(blur_score, 2)),
+        "brightness": float(round(brightness, 2)),
+        "contrast": float(round(contrast, 2))
+    }
 
 def save_trained_image(name, image):
-    """
-    Save training dataset images into Trained/<name>/
-    """
+    """Save training dataset images into Trained/<name>/"""
     person_dir = os.path.join(TRAINED_DIR, name)
     os.makedirs(person_dir, exist_ok=True)
-
     count = len(os.listdir(person_dir)) + 1
     path = os.path.join(person_dir, f"{count}.jpg")
-
     cv2.imwrite(path, image)
+    return path
 
-def get_name(filename):
-    """Extract name from filename, removing extensions and trailing numbers."""
-    # filename format: name1.jpg, name2.png -> name
-    return filename.split('.')[0].rstrip("0123456789")
-
-def extract_embeddings(img,):
-    """
-    Detect faces and return embeddings.
-    """
+def extract_embeddings(img):
+    """Detect faces and return embeddings."""
     faces = face_app.get(img)
-
     if len(faces) == 0:
         return []
-
-    embeddings = []
-    for face in faces:
-        emb = face.embedding
-        emb = emb / np.linalg.norm(emb)
-        embeddings.append(emb.tolist())
-
-    return embeddings
+    
+    # Pick the largest face (main subject)
+    largest_face = max(faces, key=lambda f: (f.bbox[2]-f.bbox[0]) * (f.bbox[3]-f.bbox[1]))
+    
+    emb = largest_face.embedding
+    emb = emb / np.linalg.norm(emb)
+    return [emb.tolist()]
 
 # -------------------------
 # API Endpoints
 # -------------------------
+@app.post("/analyze")
+async def analyze_endpoint(files: list[UploadFile] = File(...)):
+    """
+    Step 1: Analyze images and return quality scores.
+    Does NOT save anything.
+    """
+    results = []
+    for file in files:
+        contents = await file.read()
+        if not contents: continue
+        nparr = np.frombuffer(contents, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if img is None: continue
+
+        faces = face_app.get(img)
+        if not faces:
+            results.append({"filename": file.filename, "face_detected": False})
+            continue
+
+        # Check largest face
+        largest_face = max(faces, key=lambda f: (f.bbox[2]-f.bbox[0]) * (f.bbox[3]-f.bbox[1]))
+        quality_score, details = get_image_quality(img, largest_face)
+        
+        results.append({
+            "filename": file.filename,
+            "face_detected": True,
+            "quality_score": float(quality_score),
+            "is_trainable": bool(quality_score >= TRAINING_QUALITY_THRESHOLD),
+            "details": details
+        })
+    
+    return {"status": "success", "analysis": results}
 @app.post("/train")
 async def train_endpoint(
-    name: str = Form(...),
+    user_name: str = Form(...),
+    user_id: str = Form(...),
+    hostel_id: str = Form(...),
+    created_by: str = Form(...),
+    role: str = Form("resident"),
     files: list[UploadFile] = File(...)
 ):
     """
-    Train ONE person using multiple images.
-
-    name: person's name
-    files: multiple face images
+    Train ONE person using multiple images and store in MongoDB.
     """
-
-    if not name.strip():
-        raise HTTPException(status_code=400, detail="Name is required")
-
-    if len(files) == 0:
+    if not user_name.strip():
+        raise HTTPException(status_code=400, detail="User Name is required")
+    if not files:
         raise HTTPException(status_code=400, detail="No images uploaded")
 
-    db = load_db()
-    name = name.strip()
-
-    if name not in db:
-        db[name] = []
-
-    if not isinstance(db[name], list):
-        db[name] = [db[name]]
-
     trained_count = 0
+    all_embeddings = []
+    all_image_paths = []
 
     for file in files:
         contents = await file.read()
-
-        if not contents:
-            continue
-
+        if not contents: continue
         nparr = np.frombuffer(contents, np.uint8)
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-
-        if img is None:
-            continue
+        if img is None: continue
 
         embeddings = extract_embeddings(img)
+        if not embeddings: continue
 
-        if not embeddings:
-            continue
-
-        # ✅ save image to Trained folder
-        save_trained_image(name, img)
+        # Save image locally
+        img_path = save_trained_image(user_name, img)
+        all_image_paths.append(img_path)
 
         for emb in embeddings:
-            db[name].append(emb)
+            all_embeddings.append(emb)
             trained_count += 1
 
     if trained_count == 0:
-        raise HTTPException(status_code=400, detail="No faces detected")
+        raise HTTPException(status_code=400, detail="No faces detected in images")
 
-    save_db(db)
+    # Store in MongoDB
+    document = {
+        "hostel_id": hostel_id,
+        "user_name": user_name,
+        "user_id": user_id,
+        "role": role,
+        "saved_images_path": all_image_paths,
+        "created_at": datetime.now(),
+        "created_by": created_by,
+        "encodings": all_embeddings
+    }
+    
+    # Use insert_one to keep every training session as a separate record (log-style)
+    # This prevents overwriting data if the same resident ID is trained multiple times
+    collection_trained.insert_one(document)
 
     return {
         "status": "training_complete",
-        "person": name,
-        "images_processed": trained_count,
-        "total_embeddings": len(db[name])
+        "user_name": user_name,
+        "role": role,
+        "images_processed": len(all_image_paths),
+        "total_embeddings": len(all_embeddings)
     }
 
-@app.post("/scan")
-async def scan_folder_endpoint(folder_path: str = Form(TRAIN_DIR)):
-    """API endpoint to trigger a scan of a local directory."""
-    count = run_folder_training(folder_path)
-    return {"status": "success", "processed_files": count}
-
-# -------------------------
-# Local processing logic
-# -------------------------
-def run_folder_training(train_dir):
-    """Scans a directory and updates the face database."""
-    if not os.path.exists(train_dir):
-        print(f"Directory not found: {train_dir}")
-        return 0
-
-    face_db = load_db()
-    processed_count = 0
-
-    for file in os.listdir(train_dir):
-        path = os.path.join(train_dir, file)
-        if not file.lower().endswith((".png", ".jpg", ".jpeg")):
-            continue
-
-        name = get_name(file)
-        img = cv2.imread(path)
-        if img is None: continue
-
-        emb_list = extract_embeddings(img)
-        if emb_list:
-            if name not in face_db:
-                face_db[name] = []
-            
-            # For robustness, handle case where DB might have single embeddings
-            if not isinstance(face_db[name], list):
-                face_db[name] = [face_db[name]]
-
-            # save image copy
-            save_trained_image(name, img)
-
-            for emb in emb_list:
-
-                face_db[name].append(emb)
-                processed_count += 1
-            print(f"Processed: {file} -> Identity: {name}")
-
-    save_db(face_db)
-    print(f"\nTraining complete. Processed {processed_count} images.")
-    return processed_count
-
-# -------------------------
-# Entry Point
-# -------------------------
-# -------------------------
-# Entry Point (API Service)
-# -------------------------
 if __name__ == "__main__":
     print("\n🚀 Face Trainer API running at http://localhost:8001")
     uvicorn.run(app, host="0.0.0.0", port=8001)

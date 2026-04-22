@@ -1,0 +1,6 @@
+.venv/
+Trained/
+__pycache__/
+*.pyc
+embeddings.json
+.env

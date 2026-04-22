@@ -8,3 +8,6 @@ python-multipart
 flask
 pydantic_core
 scikit-image
+httpx
+boto3
+python-dotenv
