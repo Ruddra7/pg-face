@@ -6,7 +6,7 @@ import cv2
 import time
 from datetime import datetime
 from insightface.app import FaceAnalysis
-from typing import List
+from typing import List, Annotated
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 import uvicorn
 from pymongo import MongoClient
@@ -100,7 +100,7 @@ def extract_embeddings(img):
 # API Endpoints
 # -------------------------
 @app.post("/analyze")
-async def analyze_endpoint(files: List[UploadFile] = File(...)):
+async def analyze_endpoint(files: Annotated[List[UploadFile], File()]):
     """
     Step 1: Analyze images and return quality scores.
     Does NOT save anything.
@@ -131,14 +131,15 @@ async def analyze_endpoint(files: List[UploadFile] = File(...)):
         })
     
     return {"status": "success", "analysis": results}
+
 @app.post("/train")
 async def train_endpoint(
+    files: Annotated[List[UploadFile], File()],
     user_name: str = Form(...),
     user_id: str = Form(...),
     hostel_id: str = Form(...),
     created_by: str = Form(...),
-    role: str = Form("resident"),
-    files: List[UploadFile] = File(...)
+    role: str = Form("resident")
 ):
     """
     Train ONE person using multiple images and store in MongoDB.
